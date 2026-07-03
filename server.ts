@@ -1757,139 +1757,136 @@ app.post("/api/patients", authenticateToken, requireRole(["SUPER_ADMIN", "ADMIN"
   const patients = validation.data;
   try {
     if (prisma) {
-      const result = await prisma.$transaction(async (tx) => {
-        const seenEmails = new Set<string>();
-        const parseSafeDate = (val: any) => {
-          if (!val) return null;
-          const d = new Date(val);
-          return isNaN(d.getTime()) ? null : d;
-        };
+      const seenEmails = new Set<string>();
+      const parseSafeDate = (val: any) => {
+        if (!val) return null;
+        const d = new Date(val);
+        return isNaN(d.getTime()) ? null : d;
+      };
 
-        for (const p of patients) {
-          let userId: string | null = null;
-          let patientEmail = p.email;
-          if (patientEmail === "patient@dentalflow.pro") {
+      for (const p of patients) {
+        let userId: string | null = null;
+        let patientEmail = p.email;
+        if (patientEmail === "patient@dentalflow.pro") {
+          patientEmail = null;
+        }
+
+        if (patientEmail) {
+          if (seenEmails.has(patientEmail)) {
             patientEmail = null;
-          }
-
-          if (patientEmail) {
-            if (seenEmails.has(patientEmail)) {
+          } else {
+            // Check if this email is already registered to another patient
+            const anotherPatientWithEmail = await prisma.patient.findFirst({
+              where: {
+                email: patientEmail,
+                NOT: { id: p.id }
+              }
+            });
+            if (anotherPatientWithEmail) {
               patientEmail = null;
             } else {
-              // Check if this email is already registered to another patient
-              const anotherPatientWithEmail = await tx.patient.findFirst({
-                where: {
-                  email: patientEmail,
-                  NOT: { id: p.id }
-                }
-              });
-              if (anotherPatientWithEmail) {
-                patientEmail = null;
-              } else {
-                seenEmails.add(patientEmail);
-              }
+              seenEmails.add(patientEmail);
+            }
+          }
+        }
+
+        if (patientEmail) {
+          // Find or create associated User record
+          let patientUser = await prisma.user.findUnique({ where: { email: patientEmail } });
+          if (patientUser) {
+            const linkedPatient = await prisma.patient.findUnique({ where: { userId: patientUser.id } });
+            if (linkedPatient && linkedPatient.id !== p.id) {
+              // Already linked to a different patient, cannot reuse
+              patientEmail = null;
             }
           }
 
           if (patientEmail) {
-            // Find or create associated User record
-            let patientUser = await tx.user.findUnique({ where: { email: patientEmail } });
+            if (!patientUser) {
+              const existingPatient = await prisma.patient.findUnique({
+                where: { id: p.id },
+                include: { user: true }
+              });
+              if (existingPatient && existingPatient.user) {
+                patientUser = existingPatient.user;
+              }
+            }
+
             if (patientUser) {
-              const linkedPatient = await tx.patient.findUnique({ where: { userId: patientUser.id } });
-              if (linkedPatient && linkedPatient.id !== p.id) {
-                // Already linked to a different patient, cannot reuse
-                patientEmail = null;
-              }
-            }
-
-            if (patientEmail) {
-              if (!patientUser) {
-                const existingPatient = await tx.patient.findUnique({
-                  where: { id: p.id },
-                  include: { user: true }
-                });
-                if (existingPatient && existingPatient.user) {
-                  patientUser = existingPatient.user;
+              patientUser = await prisma.user.update({
+                where: { id: patientUser.id },
+                data: {
+                  name: p.name,
+                  email: patientEmail,
+                  role: UserRole.PATIENT
                 }
-              }
-
-              if (patientUser) {
-                patientUser = await tx.user.update({
-                  where: { id: patientUser.id },
-                  data: {
-                    name: p.name,
-                    email: patientEmail,
-                    role: UserRole.PATIENT
-                  }
-                });
-              } else {
-                const patientHash = bcrypt.hashSync(p.password || crypto.randomBytes(16).toString("hex"), 12);
-                patientUser = await tx.user.create({
-                  data: {
-                    name: p.name,
-                    email: patientEmail,
-                    password: patientHash,
-                    role: UserRole.PATIENT,
-                    isVerified: true
-                  }
-                });
-              }
-              userId = patientUser.id;
+              });
+            } else {
+              const patientHash = bcrypt.hashSync(p.password || crypto.randomBytes(16).toString("hex"), 12);
+              patientUser = await prisma.user.create({
+                data: {
+                  name: p.name,
+                  email: patientEmail,
+                  password: patientHash,
+                  role: UserRole.PATIENT,
+                  isVerified: true
+                }
+              });
             }
+            userId = patientUser.id;
           }
-
-          const safeIsActive = p.isActive === true || p.isActive === false ? p.isActive : true;
-
-          await tx.patient.upsert({
-            where: { id: p.id },
-            update: {
-              userId,
-              name: p.name,
-              phone: p.phone,
-              email: patientEmail || null,
-              bloodType: p.bloodType || null,
-              emergencyName: p.emergencyContact?.name || null,
-              emergencyPhone: p.emergencyContact?.phone || null,
-              emergencyRelation: p.emergencyContact?.relation || null,
-              medicalConditions: p.medicalConditions || [],
-              allergies: p.allergies || [],
-              insuranceProvider: p.insurance?.provider || null,
-              insurancePolicy: p.insurance?.policyNumber || null,
-              insuranceDiscount: Number(p.insurance?.discountPercent) || 0,
-              photoUrl: p.photoUrl || null,
-              isActive: safeIsActive,
-              totalSpent: Number(p.totalSpent) || 0,
-              outstandingBalance: Number(p.outstandingBalance) || 0,
-              lastVisit: parseSafeDate(p.lastVisit),
-            },
-            create: {
-              id: p.id,
-              userId,
-              name: p.name,
-              phone: p.phone,
-              email: patientEmail || null,
-              bloodType: p.bloodType || null,
-              emergencyName: p.emergencyContact?.name || null,
-              emergencyPhone: p.emergencyContact?.phone || null,
-              emergencyRelation: p.emergencyContact?.relation || null,
-              medicalConditions: p.medicalConditions || [],
-              allergies: p.allergies || [],
-              insuranceProvider: p.insurance?.provider || null,
-              insurancePolicy: p.insurance?.policyNumber || null,
-              insuranceDiscount: Number(p.insurance?.discountPercent) || 0,
-              photoUrl: p.photoUrl || null,
-              isActive: safeIsActive,
-              totalSpent: Number(p.totalSpent) || 0,
-              outstandingBalance: Number(p.outstandingBalance) || 0,
-              lastVisit: parseSafeDate(p.lastVisit),
-            }
-          });
-
-          // Perform automatic server-side recalculation of outstanding balance and spending (H-2)
-          await recalculatePatientBalanceServer(p.id, tx);
         }
-        return { success: true };
-      });
+
+        const safeIsActive = p.isActive === true || p.isActive === false ? p.isActive : true;
+
+        await prisma.patient.upsert({
+          where: { id: p.id },
+          update: {
+            userId,
+            name: p.name,
+            phone: p.phone,
+            email: patientEmail || null,
+            bloodType: p.bloodType || null,
+            emergencyName: p.emergencyContact?.name || null,
+            emergencyPhone: p.emergencyContact?.phone || null,
+            emergencyRelation: p.emergencyContact?.relation || null,
+            medicalConditions: p.medicalConditions || [],
+            allergies: p.allergies || [],
+            insuranceProvider: p.insurance?.provider || null,
+            insurancePolicy: p.insurance?.policyNumber || null,
+            insuranceDiscount: Number(p.insurance?.discountPercent) || 0,
+            photoUrl: p.photoUrl || null,
+            isActive: safeIsActive,
+            totalSpent: Number(p.totalSpent) || 0,
+            outstandingBalance: Number(p.outstandingBalance) || 0,
+            lastVisit: parseSafeDate(p.lastVisit),
+          },
+          create: {
+            id: p.id,
+            userId,
+            name: p.name,
+            phone: p.phone,
+            email: patientEmail || null,
+            bloodType: p.bloodType || null,
+            emergencyName: p.emergencyContact?.name || null,
+            emergencyPhone: p.emergencyContact?.phone || null,
+            emergencyRelation: p.emergencyContact?.relation || null,
+            medicalConditions: p.medicalConditions || [],
+            allergies: p.allergies || [],
+            insuranceProvider: p.insurance?.provider || null,
+            insurancePolicy: p.insurance?.policyNumber || null,
+            insuranceDiscount: Number(p.insurance?.discountPercent) || 0,
+            photoUrl: p.photoUrl || null,
+            isActive: safeIsActive,
+            totalSpent: Number(p.totalSpent) || 0,
+            outstandingBalance: Number(p.outstandingBalance) || 0,
+            lastVisit: parseSafeDate(p.lastVisit),
+          }
+        });
+
+        // Perform automatic server-side recalculation of outstanding balance and spending (H-2)
+        await recalculatePatientBalanceServer(p.id, prisma);
+      }
 
       return res.json({ success: true });
     } else {
@@ -2095,6 +2092,9 @@ app.post("/api/appointments", authenticateToken, requireRole(["SUPER_ADMIN", "AD
           await recalculatePatientBalanceServer(a.patientId, tx);
         }
         return { success: true };
+      }, {
+        maxWait: 15000,
+        timeout: 60000
       });
 
       return res.json({ success: true });
@@ -2445,62 +2445,111 @@ app.post("/api/invoices/:id/payments", authenticateToken, requireRole(["SUPER_AD
   }
 
   try {
-    const invoice = await prisma.invoice.findUnique({
-      where: { id },
-      include: { payments: true }
-    });
+    if (prisma) {
+      const invoice = await prisma.invoice.findUnique({
+        where: { id },
+        include: { payments: true }
+      });
 
-    if (!invoice) {
-      return res.status(404).json({ error: "Invoice not found" });
-    }
+      if (!invoice) {
+        return res.status(404).json({ error: "Invoice not found" });
+      }
 
-    const lockedMonths = await getLockedMonthsList();
-    const month = invoice.date.toISOString().slice(0, 7);
-    if (lockedMonths.includes(month)) {
-      return res.status(403).json({ error: "Cannot add payment to an invoice in a locked month." });
-    }
+      const lockedMonths = await getLockedMonthsList();
+      const month = invoice.date.toISOString().slice(0, 7);
+      if (lockedMonths.includes(month)) {
+        return res.status(403).json({ error: "Cannot add payment to an invoice in a locked month." });
+      }
 
-    // Add new payment
-    await prisma.payment.create({
-      data: {
+      // Add new payment
+      await prisma.payment.create({
+        data: {
+          id: crypto.randomUUID(),
+          invoiceId: id,
+          amount: numericAmount,
+          method: mapPaymentMethodToEnum(method || "Cash"),
+          notes: notes || null,
+          date: date ? new Date(date) : new Date()
+        }
+      });
+
+      // Recalculate paidAmount and update status
+      const allPayments = await prisma.payment.findMany({
+        where: { invoiceId: id }
+      });
+
+      const totalPaid = allPayments.reduce((sum, p) => sum + Number(p.amount), 0);
+      const totalAmount = Number(invoice.totalAmount);
+
+      let newStatus: InvoiceStatus = invoice.status;
+      if (invoice.status !== InvoiceStatus.CANCELLED) {
+        if (totalPaid >= totalAmount && totalAmount > 0) {
+          newStatus = InvoiceStatus.PAID;
+        } else if (totalPaid > 0) {
+          newStatus = InvoiceStatus.PARTIALLY_PAID;
+        }
+      }
+
+      await prisma.invoice.update({
+        where: { id },
+        data: {
+          paidAmount: totalPaid,
+          status: newStatus
+        }
+      });
+
+      // Perform database trigger logic to recalculate patient balance in server-side transaction
+      await recalculatePatientBalanceServer(invoice.patientId);
+
+      return res.json({ success: true, paidAmount: totalPaid, status: newStatus });
+    } else {
+      const local = readLocalJsonDb();
+      const invoices = local.invoices || [];
+      const invoiceIndex = invoices.findIndex((inv: any) => inv.id === id);
+      if (invoiceIndex === -1) {
+        return res.status(404).json({ error: "Invoice not found" });
+      }
+
+      const invoice = invoices[invoiceIndex];
+      const lockedMonths = await getLockedMonthsList();
+      const month = (invoice.date || "").slice(0, 7);
+      if (lockedMonths.includes(month)) {
+        return res.status(403).json({ error: "Cannot add payment to an invoice in a locked month." });
+      }
+
+      // Add new payment to local payments list inside invoice
+      if (!invoice.payments) {
+        invoice.payments = [];
+      }
+      const newPayment = {
         id: crypto.randomUUID(),
         invoiceId: id,
         amount: numericAmount,
-        method: mapPaymentMethodToEnum(method || "Cash"),
+        method: method || "Cash",
         notes: notes || null,
-        date: date ? new Date(date) : new Date()
+        date: date || new Date().toISOString()
+      };
+      invoice.payments.push(newPayment);
+
+      const totalPaid = invoice.payments.reduce((sum: number, p: any) => sum + Number(p.amount), 0);
+      const totalAmount = Number(invoice.totalAmount);
+
+      let newStatus = invoice.status || "Unpaid";
+      if (invoice.status !== "Cancelled" && invoice.status !== "CANCELLED") {
+        if (totalPaid >= totalAmount && totalAmount > 0) {
+          newStatus = "Paid";
+        } else if (totalPaid > 0) {
+          newStatus = "Partially Paid";
+        }
       }
-    });
 
-    // Recalculate paidAmount and update status
-    const allPayments = await prisma.payment.findMany({
-      where: { invoiceId: id }
-    });
+      invoice.paidAmount = totalPaid;
+      invoice.status = newStatus;
 
-    const totalPaid = allPayments.reduce((sum, p) => sum + Number(p.amount), 0);
-    const totalAmount = Number(invoice.totalAmount);
+      writeLocalJsonDb("invoices", invoices);
 
-    let newStatus: InvoiceStatus = invoice.status;
-    if (invoice.status !== InvoiceStatus.CANCELLED) {
-      if (totalPaid >= totalAmount && totalAmount > 0) {
-        newStatus = InvoiceStatus.PAID;
-      } else if (totalPaid > 0) {
-        newStatus = InvoiceStatus.PARTIALLY_PAID;
-      }
+      return res.json({ success: true, paidAmount: totalPaid, status: newStatus });
     }
-
-    await prisma.invoice.update({
-      where: { id },
-      data: {
-        paidAmount: totalPaid,
-        status: newStatus
-      }
-    });
-
-    // Perform database trigger logic to recalculate patient balance in server-side transaction
-    await recalculatePatientBalanceServer(invoice.patientId);
-
-    return res.json({ success: true, paidAmount: totalPaid, status: newStatus });
   } catch (err) {
     console.error("Failed to add payment:", err);
     return res.status(500).json({ error: "Failed to add payment" });
@@ -3749,8 +3798,8 @@ app.post("/api/auth/login", rateLimiter(10, 60 * 1000), async (req, res) => {
 
       await prisma.refreshToken.create({
         data: {
-          userId: userRole !== "PATIENT" ? userId : null,
-          patientId: userRole === "PATIENT" ? userId : null,
+          userId: matchedUser ? matchedUser.id : null,
+          patientId: matchedPatient ? matchedPatient.id : null,
           tokenHash,
           expiresAt,
         }
